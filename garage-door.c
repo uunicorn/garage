@@ -20,6 +20,8 @@
 
 #define DRVNAME "garage-door"
 
+#define BUSY_LED_PIN 19
+
 #define PHYS_TO_DMA(x) (0x7E000000 - BCM2708_PERI_BASE + x)
 
 #define PWM_BASE (BCM2708_PERI_BASE + 0x20C000)
@@ -50,14 +52,18 @@
 #define PWM_DAT1 0x14
 #define PWM_DAT2 0x24
 
-#define CLRF (1 << 6)
-#define MSEN2 (1 << 15)
-#define RPTL1 (1 << 2)
-#define RPTL2 (1 << 10)
-#define PWEN1 (1 << 0)
-#define MODE1 (1 << 1)
-#define PWEN2 (1 << 8)
-#define USEF2 (1 << 13)
+#define PWEN1   BIT(0)
+#define MODE1   BIT(1)
+#define RPTL1   BIT(2)
+#define CLRF    BIT(6)
+#define PWEN2   BIT(8)
+#define RPTL2   BIT(10)
+#define USEF2   BIT(13)
+#define MSEN2   BIT(15)
+
+#define GPIO_REG_SET(x)     (x < 32 ? 0x1c : 0x20)
+#define GPIO_REG_CLEAR(x)   (x < 32 ? 0x28 : 0x2c)
+#define GPIO_BIT(x)         BIT(x < 32 ? x : (x - 32))
 
 // reserve this number of DMA control blocks
 #define MAX_CBS 600
@@ -71,8 +77,8 @@ const char * const code = "11111011011001001001001001001011011001001001011011111
 struct garage_dev {
     struct device *dev;
 
-    void *pwm_reg, *dma_reg, *dma_chan_base;
-    u32 *gpio_reg, *clk_reg;
+    void *pwm_reg, *dma_reg, *dma_chan_base, *gpio_reg;
+    u32 *clk_reg;
 
     struct dma_chan *dma_chan;
     struct bcm2708_dma_cb *cb_base;		/* DMA control blocks */
@@ -89,32 +95,27 @@ static struct platform_device *pdev;
 
 static void gpio_set_mode(struct garage_dev *g, unsigned gpio, unsigned mode)
 {
-    int reg, shift;
+    int shift;
+    void *reg;
 
-    reg   =  gpio/10;
+    reg = g->gpio_reg + 4*(gpio/10);
     shift = (gpio%10) * 3;
 
-    g->gpio_reg[reg] = (g->gpio_reg[reg] & ~(7<<shift)) | (mode<<shift);
+    writel((readl(reg) & ~(7 << shift)) | (mode << shift), reg);
 }
 
 static void gpio_set(struct garage_dev *g, unsigned gpio)
 {
-    if(gpio < 32) {
-        g->gpio_reg[7] |= 1 << gpio;
-    } 
-    else {
-        g->gpio_reg[8] |= 1 << (gpio-32);
-    }
+    void *reg = GPIO_REG_SET(gpio) + g->gpio_reg;
+
+    writel(readl(reg) | GPIO_BIT(gpio), reg);
 }
 
 static void gpio_clear(struct garage_dev *g, unsigned gpio)
 {
-    if(gpio < 32) {
-        g->gpio_reg[0xa] |= 1 << gpio;
-    } 
-    else {
-        g->gpio_reg[0xb] |= 1 << (gpio-32);
-    }
+    void *reg = GPIO_REG_CLEAR(gpio) + g->gpio_reg;
+
+    writel(readl(reg) | GPIO_BIT(gpio), reg);
 }
 
 static int garage_allocate_resources(struct garage_dev *g)
@@ -278,9 +279,8 @@ static int start_dummy_tx(struct garage_dev *g)
     return 0;
 }
 
-static void init_pwm_clock(struct garage_dev *g)
+static void init_pwm_clock(struct garage_dev *g, int freq)
 {
-    int freq = g->freq*2;
     int divi, divf;
     long long tmp;
 
@@ -357,21 +357,27 @@ static int garage_probe(struct platform_device *pdev)
         return err;
     }
 
-    gpio_set_mode(g, 18, 2); // pin18 -> PWM out
-    gpio_set_mode(g, 19, 1); // pin19 -> GPIO out (busy led)
-    gpio_set(g, 19); // busy led ON
+    gpio_set_mode(g, 18, 2);                // pin18 -> PWM out
+    gpio_set_mode(g, BUSY_LED_PIN, 1);      // GPIO out (busy led)
+    gpio_set(g, BUSY_LED_PIN);              // busy led ON
 
     buf = (u32*)(g->cb_base + MAX_CBS);
     g->buf_handle = g->cb_handle + sizeof(*g->cb_base)*MAX_CBS;
 
-    init_pwm_clock(g);
+    // set PWM clock to 2x carrier frequency 
+    // (2x, because 101010...1010b serializer pattern divides clock frequency by two)
+    init_pwm_clock(g, g->freq*2);
 
-    writel(CLRF, g->pwm_reg + PWM_CTRL); // stop channel, clear fifo
+    writel(CLRF, g->pwm_reg + PWM_CTRL); // stop both channels, clear fifo
     writel(0, g->pwm_reg + PWM_DMAC); // disable DMA
-    writel(32, g->pwm_reg + PWM_RNG1); // set period to 1/2 seconds
+
+    writel(32, g->pwm_reg + PWM_RNG1); // set PWM1 pattern width to 32 bits
+    writel(0, g->pwm_reg + PWM_DAT1); // set initial amplitude to zero (seializing zero)
+
     writel(width, g->pwm_reg + PWM_RNG2); // set period to 1/2 seconds
-    writel(0, g->pwm_reg + PWM_DAT1); // set initial amplitude to zero
-    // enable channels
+    // enable channels:
+    // PWM1 - 32bit serializer mode, no FIFO, repeat
+    // PWM2 - M/S mode, FIFO, no repeat
     writel(CLRF | MODE1 | PWEN1 | RPTL1 | MSEN2 | PWEN2 | USEF2, g->pwm_reg + PWM_CTRL);
 
     if((err = start_dummy_tx(g)) < 0) {
@@ -380,7 +386,7 @@ static int garage_probe(struct platform_device *pdev)
     }
 
     // setup buffer
-    buf[0] = 1 << 19;       // busy led pin
+    buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
     buf[1] = 0;             // amplitude == 0
     buf[2] = 0xaaaaaaaa;    // amplitude == max (1010101010...1010b)
     for(i=0;i<XFR_SZ;i++) {
@@ -393,7 +399,7 @@ static int garage_probe(struct platform_device *pdev)
         outbit(g, *p == '1');
     }
 
-    add_xfer(g, g->buf_handle, PHYS_TO_DMA(GPIO_BASE+0x28), 4)
+    add_xfer(g, g->buf_handle, PHYS_TO_DMA(GPIO_BASE + GPIO_REG_CLEAR(BUSY_LED_PIN)), 4)
         ->info |= BCM2708_DMA_INT_EN;
 
     writel(BCM2708_DMA_RESET | BCM2708_DMA_ABORT, g->dma_chan_base + BCM2708_DMA_CS);
@@ -413,7 +419,7 @@ static int garage_remove(struct platform_device *pdev)
 {
     struct garage_dev *g = platform_get_drvdata(pdev);
 
-    gpio_clear(g, 19);
+    gpio_clear(g, BUSY_LED_PIN);
 
     garage_stop(g);
 

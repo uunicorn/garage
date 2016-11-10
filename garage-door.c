@@ -22,26 +22,27 @@
 
 #define BUSY_LED_PIN 19
 
-#define PHYS_TO_DMA(x) (0x7E000000 - BCM2708_PERI_BASE + x)
+#define PHYS_TO_DMA(x)  (0x7E000000 - BCM2708_PERI_BASE + x)
 
-#define PWM_BASE (BCM2708_PERI_BASE + 0x20C000)
-#define CLK_BASE (BCM2708_PERI_BASE + 0x101000)
-#define PWMCLK_CNTL 0x28
-#define PWMCLK_DIV 0x29
+#define CLK_BASE        (BCM2708_PERI_BASE + 0x101000)
+#define PWMCLK_CNTL     0xa0
+#define PWMCLK_DIV      0xa4
 
-#define GHZ         1000000000
+#define GHZ             1000000000
 
-#define PLL_192MHZ  0x1
-#define PLL_1GHZ    0x5
-#define PLL_500MHZ  0x6
+#define PLL_192MHZ      0x1
+#define PLL_1GHZ        0x5
+#define PLL_500MHZ      0x6
 
-#define CLK_PASSWD  0x5A000000
+#define CLK_PASSWD      0x5A000000
 
 #define CLKCNTL_ENAB    (1 << 4)
 #define CLKCNTL_MASH(x) (x << 9)
 
-#define CLKDIV_DIVI(x) (x << 12)
-#define CLKDIV_DIVF(x) (x << 0)
+#define CLKDIV_DIVI(x)  (x << 12)
+#define CLKDIV_DIVF(x)  (x << 0)
+
+#define PWM_BASE        (BCM2708_PERI_BASE + 0x20C000)
 
 #define PWM_CTRL 0x00
 #define PWM_STAT 0x04
@@ -76,8 +77,7 @@ const char * const code = "11111011011001001001001001001011011001001001011011111
 struct garage_dev {
     struct device *dev;
 
-    void *pwm_reg, *dma_reg, *dma_chan_base, *gpio_reg;
-    u32 *clk_reg;
+    void *pwm_reg, *dma_reg, *dma_chan_base, *gpio_reg, *clk_reg;
 
     struct dma_chan *dma_chan;
     struct bcm2708_dma_cb *cb_base;		/* DMA control blocks */
@@ -173,7 +173,7 @@ static void garage_stop(struct garage_dev *g)
 
     if(g->clk_reg) {
         // stop all the clocks...
-        g->clk_reg[PWMCLK_CNTL] = CLK_PASSWD | PLL_500MHZ | CLKCNTL_MASH(0);
+        writel(CLK_PASSWD | CLKCNTL_MASH(0) | PLL_500MHZ, g->clk_reg + PWMCLK_CNTL);
     }
 
     if(g->pwm_reg) {
@@ -282,15 +282,16 @@ static void init_pwm_clock(struct garage_dev *g, int freq)
 {
     int divi, divf;
     long long tmp;
+    u32 ctl = CLK_PASSWD | CLKCNTL_MASH(3) | PLL_1GHZ;
 
     divi = GHZ/freq;
     tmp = 0x1000LL*(GHZ%freq);
     do_div(tmp, freq);
     divf = (int) tmp;
 
-    g->clk_reg[PWMCLK_CNTL] = CLK_PASSWD | CLKCNTL_MASH(3) | PLL_1GHZ; // disable clock
-    g->clk_reg[PWMCLK_DIV] = CLK_PASSWD | CLKDIV_DIVI(divi) | CLKDIV_DIVF(divf); // set div ratio
-    g->clk_reg[PWMCLK_CNTL] = CLK_PASSWD | CLKCNTL_ENAB | CLKCNTL_MASH(3) | PLL_1GHZ; // enable clock
+    writel(ctl, g->clk_reg + PWMCLK_CNTL); // disable clock
+    writel(CLK_PASSWD | CLKDIV_DIVI(divi) | CLKDIV_DIVF(divf), g->clk_reg + PWMCLK_DIV); // set div ratio
+    writel(ctl | CLKCNTL_ENAB, g->clk_reg + PWMCLK_CNTL); // enable clock
 }
 
 

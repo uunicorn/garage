@@ -68,9 +68,6 @@
 // reserve this number of DMA control blocks
 #define MAX_CBS 600
 
-// number of words to transfer per single sample. Must be at least the size of the PWM FIFO
-#define XFR_SZ 16 
-
 // AM sequence
 const char * const code = "111110110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111111011001001001001001001011011001001001011011111110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111110";
 
@@ -332,7 +329,7 @@ static void outbit(struct garage_dev *g, int bit)
     add_xfer(g, g->buf_handle+4+(bit ? 4 : 0), PHYS_TO_DMA(PWM_BASE + PWM_DAT1), 4);
 
     // wait 1 full sample rate period
-    add_xfer(g, g->buf_handle+4*3, PHYS_TO_DMA(PWM_BASE + PWM_FIFO), XFR_SZ*4)
+    add_xfer(g, g->buf_handle+4*3, PHYS_TO_DMA(PWM_BASE + PWM_FIFO), 4)
         ->info |= BCM2708_DMA_PER_MAP(5) | BCM2708_DMA_D_DREQ; 
 }
 
@@ -341,14 +338,14 @@ static int garage_probe(struct platform_device *pdev)
     struct device *dev = &pdev->dev;
     struct garage_dev *g = kzalloc(sizeof(struct garage_dev), GFP_KERNEL);
     u32 *buf;
-    int err, i, width;
+    int err, width;
     const char *p;
 
     platform_set_drvdata(pdev, g);
     g->dev = dev;
     g->dma_chan_base = NULL;
     g->freq = 40685000; // 40MHz carrier
-    g->srate = 1250*XFR_SZ; // 1250Hz = 800us period
+    g->srate = 1250; // 1250Hz = 800us period
 
     width = 2*g->freq/g->srate;
 
@@ -389,9 +386,7 @@ static int garage_probe(struct platform_device *pdev)
     buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
     buf[1] = 0;             // amplitude == 0
     buf[2] = 0xaaaaaaaa;    // amplitude == max (1010101010...1010b)
-    for(i=0;i<XFR_SZ;i++) {
-        buf[i+3] = width/2; // don't care, but could be useful for debugging
-    }
+    buf[3] = width/2;       // don't care, but 50% duty cycle could be useful for debugging
 
     g->sample = 0;
 

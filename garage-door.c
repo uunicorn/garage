@@ -52,14 +52,16 @@
 #define PWM_DAT1 0x14
 #define PWM_DAT2 0x24
 
-#define PWEN1   BIT(0)
-#define MODE1   BIT(1)
-#define RPTL1   BIT(2)
-#define CLRF    BIT(6)
-#define PWEN2   BIT(8)
-#define RPTL2   BIT(10)
-#define USEF2   BIT(13)
-#define MSEN2   BIT(15)
+#define PWMCTRL_PWEN1   BIT(0)
+#define PWMCTRL_MODE1   BIT(1)
+#define PWMCTRL_RPTL1   BIT(2)
+#define PWMCTRL_CLRF    BIT(6)
+#define PWMCTRL_PWEN2   BIT(8)
+#define PWMCTRL_RPTL2   BIT(10)
+#define PWMCTRL_USEF2   BIT(13)
+#define PWMCTRL_MSEN2   BIT(15)
+
+#define PWMDMAC_ENAB    BIT(31)
 
 #define GPIO_REG_SET(x)     (x < 32 ? 0x1c : 0x20)
 #define GPIO_REG_CLEAR(x)   (x < 32 ? 0x28 : 0x2c)
@@ -175,7 +177,7 @@ static void garage_stop(struct garage_dev *g)
     }
 
     if(g->pwm_reg) {
-        writel(CLRF, g->pwm_reg + PWM_CTRL);
+        writel(PWMCTRL_CLRF, g->pwm_reg + PWM_CTRL);
     }
 
     if(g->dma_chan_base) {
@@ -365,7 +367,7 @@ static int garage_probe(struct platform_device *pdev)
     // (2x, because 101010...1010b serializer pattern divides clock frequency by two)
     init_pwm_clock(g, g->freq*2);
 
-    writel(CLRF, g->pwm_reg + PWM_CTRL); // stop both channels, clear fifo
+    writel(PWMCTRL_CLRF, g->pwm_reg + PWM_CTRL); // stop both channels, clear fifo
     writel(0, g->pwm_reg + PWM_DMAC); // disable DMA
 
     writel(32, g->pwm_reg + PWM_RNG1); // set PWM1 pattern width to 32 bits
@@ -375,7 +377,10 @@ static int garage_probe(struct platform_device *pdev)
     // enable channels:
     // PWM1 - 32bit serializer mode, no FIFO, repeat
     // PWM2 - M/S mode, FIFO, no repeat
-    writel(CLRF | MODE1 | PWEN1 | RPTL1 | MSEN2 | PWEN2 | USEF2, g->pwm_reg + PWM_CTRL);
+    writel(PWMCTRL_CLRF | 
+            PWMCTRL_MODE1 | PWMCTRL_PWEN1 | PWMCTRL_RPTL1 | 
+            PWMCTRL_MSEN2 | PWMCTRL_PWEN2 | PWMCTRL_USEF2, 
+            g->pwm_reg + PWM_CTRL);
 
     if((err = start_dummy_tx(g)) < 0) {
         garage_release_resources(g);
@@ -398,14 +403,17 @@ static int garage_probe(struct platform_device *pdev)
         ->info |= BCM2708_DMA_INT_EN;
 
     writel(BCM2708_DMA_RESET | BCM2708_DMA_ABORT, g->dma_chan_base + BCM2708_DMA_CS);
-    writel(BCM2708_DMA_INT | BIT(1), g->dma_chan_base + BCM2708_DMA_CS); // INT & END
+    writel(BCM2708_DMA_INT | BIT(1), g->dma_chan_base + BCM2708_DMA_CS); // clear INT & END
 
     bcm_dma_start(g->dma_chan_base, g->cb_handle);
     g->start_time = ktime_get();
 
     // clear FIFO, restart PWM
-    writel(CLRF | MODE1 | PWEN1 | RPTL1 | MSEN2 | PWEN2 | USEF2, g->pwm_reg + PWM_CTRL);
-    writel(0x80000001, g->pwm_reg + PWM_DMAC); // enable DMA, 1 word threshold
+    writel(PWMCTRL_CLRF | 
+            PWMCTRL_MODE1 | PWMCTRL_PWEN1 | PWMCTRL_RPTL1 | 
+            PWMCTRL_MSEN2 | PWMCTRL_PWEN2 | PWMCTRL_USEF2, 
+            g->pwm_reg + PWM_CTRL);
+    writel(PWMDMAC_ENAB | 1, g->pwm_reg + PWM_DMAC); // enable DMA, 1 word threshold
 
     return 0;
 }

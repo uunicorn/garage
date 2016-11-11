@@ -19,29 +19,11 @@
 #include "garage-gpio.h"
 #include "garage-pwm.h"
 #include "garage-dma.h"
+#include "garage-clk.h"
 
 #define DRVNAME "garage-door"
 
 #define BUSY_LED_PIN 19
-
-#define CLK_BASE        (BCM2708_PERI_BASE + 0x101000)
-#define PWMCLK_CNTL     0xa0
-#define PWMCLK_DIV      0xa4
-
-#define GHZ             1000000000
-
-#define PLL_192MHZ      0x1
-#define PLL_1GHZ        0x5
-#define PLL_500MHZ      0x6
-
-#define CLK_PASSWD      0x5A000000
-
-#define CLKCNTL_ENAB    (1 << 4)
-#define CLKCNTL_MASH(x) (x << 9)
-
-#define CLKDIV_DIVI(x)  (x << 12)
-#define CLKDIV_DIVF(x)  (x << 0)
-
 
 // AM sequence
 const char * const code = "111110110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111111011001001001001001001011011001001001011011111110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111110";
@@ -72,22 +54,17 @@ static void garage_release_resources(struct garage_dev *g)
 
 static void garage_stop(struct garage_dev *g)
 {
-    if(g->gpio_reg) {
+    if(g->gpio_reg)
         gpio_set_mode(g, 18, 1);
-    }
 
-    if(g->clk_reg) {
-        // stop all the clocks...
-        writel(CLK_PASSWD | CLKCNTL_MASH(0) | PLL_500MHZ, g->clk_reg + PWMCLK_CNTL);
-    }
+    if(g->clk_reg)
+        pwm_clock_stop(g);
 
-    if(g->pwm_reg) {
+    if(g->pwm_reg)
         pwm_stop(g);
-    }
 
-    if(g->dma_chan_base) {
+    if(g->dma_chan_base)
         dma_reset(g);
-    }
 }
 
 void garage_dma_done(void *data)
@@ -98,22 +75,6 @@ void garage_dma_done(void *data)
     garage_stop(g);
 
     printk(KERN_INFO "all done: %ld ms\n", (long)ktime_to_ms(diff));
-}
-
-static void init_pwm_clock(struct garage_dev *g, int freq)
-{
-    int divi, divf;
-    long long tmp;
-    u32 ctl = CLK_PASSWD | CLKCNTL_MASH(3) | PLL_1GHZ;
-
-    divi = GHZ/freq;
-    tmp = 0x1000LL*(GHZ%freq);
-    do_div(tmp, freq);
-    divf = (int) tmp;
-
-    writel(ctl, g->clk_reg + PWMCLK_CNTL); // disable clock
-    writel(CLK_PASSWD | CLKDIV_DIVI(divi) | CLKDIV_DIVF(divf), g->clk_reg + PWMCLK_DIV); // set div ratio
-    writel(ctl | CLKCNTL_ENAB, g->clk_reg + PWMCLK_CNTL); // enable clock
 }
 
 static void outbit(struct garage_dev *g, int bit)
@@ -151,12 +112,9 @@ static int garage_probe(struct platform_device *pdev)
     gpio_set_mode(g, BUSY_LED_PIN, 1);      // GPIO out (busy led)
     gpio_set(g, BUSY_LED_PIN);              // busy led ON
 
-    buf = (u32*)(g->cb_base + MAX_CBS);
-    g->buf_handle = g->cb_handle + sizeof(*g->cb_base)*MAX_CBS;
-
     // set PWM clock to 2x carrier frequency 
     // (2x, because 101010...1010b serializer pattern divides clock frequency by two)
-    init_pwm_clock(g, g->freq*2);
+    pwm_clock_init(g, g->freq*2);
 
     pwm_stop(g);
 
@@ -166,6 +124,9 @@ static int garage_probe(struct platform_device *pdev)
         garage_release_resources(g);
         return err;
     }
+
+    buf = (u32*)(g->cb_base + MAX_CBS);
+    g->buf_handle = g->cb_handle + sizeof(*g->cb_base)*MAX_CBS;
 
     // setup the buffer
     buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
@@ -208,11 +169,11 @@ static int garage_remove(struct platform_device *pdev)
 }
 
 static struct platform_driver garage_driver = {
-	.probe		= garage_probe,
-	.remove		= garage_remove,
-	.driver		= {
-		.name		= DRVNAME,
-	},
+    .probe    = garage_probe,
+    .remove   = garage_remove,
+    .driver   = {
+        .name = DRVNAME,
+    },
 };
 
 static int __init garage_init(void)

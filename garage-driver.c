@@ -23,13 +23,6 @@
 
 #define DRVNAME "garage-door"
 
-#define BUSY_LED_PIN 19
-
-// AM sequence
-const char * const code = "111110110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111111011001001001001001001011011001001001011011111110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111110";
-
-static struct platform_device *pdev;
-
 static int garage_allocate_resources(struct garage_dev *g)
 {
     int err;
@@ -91,22 +84,44 @@ static int garage_probe(struct platform_device *pdev)
 {
     struct device *dev = &pdev->dev;
     struct garage_dev *g = kzalloc(sizeof(struct garage_dev), GFP_KERNEL);
-    u32 *buf;
-    int err, width;
-    const char *p;
+    int err;
 
     platform_set_drvdata(pdev, g);
+    g->magic = 0x111118;
     g->dev = dev;
     g->dma_chan_base = NULL;
-    g->freq = 40685000; // 40MHz carrier
-    g->srate = 1250; // 1250Hz = 800us period
-
-    width = 2*g->freq/g->srate;
+    g->freq = 0;
+    g->srate = 0;
 
     if((err = garage_allocate_resources(g)) < 0) {
         garage_release_resources(g);
         return err;
     }
+
+    return 0;
+}
+
+static int garage_remove(struct platform_device *pdev)
+{
+    struct garage_dev *g = platform_get_drvdata(pdev);
+
+    gpio_clear(g, BUSY_LED_PIN);
+
+    garage_stop(g);
+
+    garage_release_resources(g);
+
+    platform_set_drvdata(pdev, NULL);
+
+    printk(KERN_INFO "Goodbye world.\n");
+
+    return 0;
+}
+
+static int send_sequence(struct garage_dev *g, const char *code)
+{
+    const char *p;
+    int err;
 
     gpio_set_mode(g, 18, 2);                // pin18 -> PWM out
     gpio_set_mode(g, BUSY_LED_PIN, 1);      // GPIO out (busy led)
@@ -121,23 +136,23 @@ static int garage_probe(struct platform_device *pdev)
     pwm_init(g, 0); // start PWM, but keep DREQ low
 
     if((err = start_dummy_tx(g)) < 0) {
-        garage_release_resources(g);
+        garage_stop(g);
         return err;
     }
-
-    buf = (u32*)(g->cb_base + MAX_CBS);
-    g->buf_handle = g->cb_handle + sizeof(*g->cb_base)*MAX_CBS;
-
-    // setup the buffer
-    buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
-    buf[1] = 0;             // amplitude == 0
-    buf[2] = 0xaaaaaaaa;    // amplitude == max (1010101010...1010b)
-    buf[3] = width/2;       // don't care, but 50% duty cycle could be useful for debugging
 
     g->sample = 0;
 
     for(p=code;*p;p++) {
-        outbit(g, *p == '1');
+        switch(*p) {
+            case '1':
+                outbit(g, 1);
+                break;
+            case '0':
+                outbit(g, 0);
+                break;
+            default:
+                /* ignore */ ;
+        }
     }
 
     add_xfer(g, g->buf_handle, PHYS_TO_DMA(GPIO_BASE + GPIO_REG_CLEAR(BUSY_LED_PIN)), 4)
@@ -153,20 +168,110 @@ static int garage_probe(struct platform_device *pdev)
     return 0;
 }
 
-static int garage_remove(struct platform_device *pdev)
+static ssize_t carrier_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-    struct garage_dev *g = platform_get_drvdata(pdev);
+    struct garage_dev *g = dev_get_drvdata(dev);
 
-    gpio_clear(g, BUSY_LED_PIN);
+    if(g == NULL) {
+        dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
 
-    garage_stop(g);
-
-    garage_release_resources(g);
-
-    printk(KERN_INFO "Goodbye world.\n");
-
-    return 0;
+    return scnprintf(buf, PAGE_SIZE, "%d\n", g->freq);
 }
+
+static ssize_t carrier_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    char *end;
+    long new = simple_strtol(buf, &end, 0);
+    struct garage_dev *g = dev_get_drvdata(dev);
+    
+    if (end == buf || new > INT_MAX || new < INT_MIN) {
+        dev_err(g->dev, "error: int number expected for carrier attribute\n");
+        return -EINVAL;
+    }
+
+    if(g == NULL) {
+        dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
+
+    g->freq = (long)new;
+
+    return count;
+}
+
+
+static ssize_t srate_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct garage_dev *g = dev_get_drvdata(dev);
+
+    if(g == NULL) {
+        dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
+
+    return scnprintf(buf, PAGE_SIZE, "%d\n", g->srate);
+}
+
+static ssize_t srate_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    char *end;
+    long new = simple_strtol(buf, &end, 0);
+    struct garage_dev *g = dev_get_drvdata(dev);
+    
+    if (end == buf || new > INT_MAX || new < INT_MIN) {
+        dev_err(g->dev, "error: int number expected for srate attribute\n");
+        return -EINVAL;
+    }
+
+    if(g == NULL) {
+        dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
+
+    g->srate = (long)new;
+
+    return count;
+}
+
+static ssize_t sequence_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct garage_dev *g = dev_get_drvdata(dev);
+    int err;
+
+    if(g == NULL) {
+        dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
+
+    err = send_sequence(g, buf);
+
+    if(err < 0)
+        return err;
+
+    return count;
+}
+
+DEVICE_ATTR(carrier, 0644, carrier_show, carrier_store);
+DEVICE_ATTR(srate, 0644, srate_show, srate_store);
+DEVICE_ATTR(sequence, 0644, NULL, sequence_store);
+
+static struct attribute *dev_attrs[] = {
+    &dev_attr_carrier.attr,
+    &dev_attr_srate.attr,
+    &dev_attr_sequence.attr,
+    NULL,
+};
+
+static struct attribute_group dev_attr_group = {
+    .attrs = dev_attrs,
+};
+
+static const struct attribute_group *dev_attr_groups[] = {
+    &dev_attr_group,
+    NULL,
+};
 
 static struct platform_driver garage_driver = {
     .probe    = garage_probe,
@@ -176,6 +281,24 @@ static struct platform_driver garage_driver = {
     },
 };
 
+
+static void platform_device_release(struct device *dev)
+{
+}
+
+static struct platform_device garage_device = {
+    .name = DRVNAME,
+    .id = -1,
+    .resource = NULL,
+    .num_resources = 0,
+    .dev = {
+        .release = platform_device_release,
+        .groups = dev_attr_groups,
+        .coherent_dma_mask = DMA_BIT_MASK(32),
+    },
+};
+
+
 static int __init garage_init(void)
 {
     int ret;
@@ -184,12 +307,11 @@ static int __init garage_init(void)
     if(ret < 0)
         return ret;
 
-    pdev = platform_device_register_simple(DRVNAME, -1, NULL, 0);
-    if (IS_ERR(pdev)) {
+    ret = platform_device_register(&garage_device);
+    if(ret < 0) {
         platform_driver_unregister(&garage_driver);
-        return PTR_ERR(pdev);
+        return ret;
     }
-
 
     return 0;
 }
@@ -198,7 +320,7 @@ module_init(garage_init);
 
 static void __exit garage_exit(void)
 {
-    platform_device_unregister(pdev);
+    platform_device_unregister(&garage_device);
     platform_driver_unregister(&garage_driver);
 }
 

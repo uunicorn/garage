@@ -2,6 +2,9 @@
 #ifndef __GARAGE_DRIVER_H__
 #define __GARAGE_DRIVER_H__
 
+#define BUSY_LED_PIN 19
+
+
 struct garage_dev {
     struct device *dev;
 
@@ -10,6 +13,7 @@ struct garage_dev {
     struct dma_chan *dma_chan;
     struct bcm2708_dma_cb *cb_base;		/* DMA control blocks */
     dma_addr_t cb_handle, buf_handle;
+    int magic;
     int sample;
     int freq;
     int srate;

@@ -7,11 +7,13 @@
 
 #include "garage-driver.h"
 #include "garage-dma.h"
+#include "garage-gpio.h"
 
 
 int dma_allocate(struct garage_dev *g)
 {
     dma_cap_mask_t mask;
+    u32 *buf;
 
     g->dma_reg = ioremap(DMA_BASE, SZ_16K);
 
@@ -19,8 +21,6 @@ int dma_allocate(struct garage_dev *g)
         dev_err(g->dev, "error: failed to ioremap DMA registers\n");
         return -ENOMEM;
     }
-
-    dma_set_coherent_mask(g->dev, DMA_BIT_MASK(32)); //XXX: move me to __init?
 
     dma_cap_zero(mask);
     dma_cap_set(DMA_SLAVE, mask);
@@ -30,11 +30,20 @@ int dma_allocate(struct garage_dev *g)
         return -EIO;
     }
 
-    g->cb_base = dma_alloc_writecombine(g->dev, SZ_64K, &g->cb_handle, GFP_KERNEL);
+    g->cb_base = dma_alloc_writecombine(g->dev, sizeof(*g->cb_base)*MAX_CBS + 4*4, &g->cb_handle, GFP_KERNEL);
     if(g->cb_base == NULL) {
         dev_err(g->dev, "error: dma_alloc_writecombine failed\n");
         return -ENOMEM;
     }
+
+    buf = (u32*)(g->cb_base + MAX_CBS);
+    g->buf_handle = g->cb_handle + sizeof(*g->cb_base)*MAX_CBS;
+
+    // setup the buffer
+    buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
+    buf[1] = 0;             // amplitude == 0
+    buf[2] = 0xaaaaaaaa;    // amplitude == max (1010101010...1010b)
+    buf[3] = 0;             // carrier to sample rate ratio is unknown yet. Set to half of PWM_RNG2 for debugging.
 
     printk(KERN_INFO "Allocated DMA channel %d\n", g->dma_chan->chan_id);
 
@@ -50,7 +59,7 @@ void dma_release(struct garage_dev *g)
         dma_release_channel(g->dma_chan);
 
     if(g->cb_base)
-        dma_free_writecombine(g->dev, SZ_64K, g->cb_base, g->cb_handle);
+        dma_free_writecombine(g->dev, sizeof(*g->cb_base)*MAX_CBS + 4*4, g->cb_base, g->cb_handle);
 
     if(g->dma_reg)
         iounmap(g->dma_reg);

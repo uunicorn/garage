@@ -1,5 +1,8 @@
+MODULE_NAME=garage-door
 
-obj-m += garage-door.o
+$(MODULE_NAME)-y += garage-driver.o garage-gpio.o
+
+obj-m := $(MODULE_NAME).o
 
 all: modules
 

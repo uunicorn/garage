@@ -18,6 +18,9 @@
 #include <linux/delay.h>
 #include <linux/timekeeping.h>
 
+#include "garage-driver.h"
+#include "garage-gpio.h"
+
 #define DRVNAME "garage-door"
 
 #define BUSY_LED_PIN 19
@@ -64,58 +67,13 @@
 
 #define PWMDMAC_ENAB    BIT(31)
 
-#define GPIO_REG_SET(x)     (x < 32 ? 0x1c : 0x20)
-#define GPIO_REG_CLEAR(x)   (x < 32 ? 0x28 : 0x2c)
-#define GPIO_BIT(x)         BIT(x < 32 ? x : (x - 32))
-
 // reserve this number of DMA control blocks
 #define MAX_CBS 600
 
 // AM sequence
 const char * const code = "111110110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111111011001001001001001001011011001001001011011111110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111110";
 
-struct garage_dev {
-    struct device *dev;
-
-    void *pwm_reg, *dma_reg, *dma_chan_base, *gpio_reg, *clk_reg;
-
-    struct dma_chan *dma_chan;
-    struct bcm2708_dma_cb *cb_base;		/* DMA control blocks */
-    dma_addr_t cb_handle, buf_handle;
-    struct scatterlist sg;
-    int sample;
-    int freq;
-    int srate;
-    ktime_t start_time;
-};
-
 static struct platform_device *pdev;
-
-
-static void gpio_set_mode(struct garage_dev *g, unsigned gpio, unsigned mode)
-{
-    int shift;
-    void *reg;
-
-    reg = g->gpio_reg + 4*(gpio/10);
-    shift = (gpio%10) * 3;
-
-    writel((readl(reg) & ~(7 << shift)) | (mode << shift), reg);
-}
-
-static void gpio_set(struct garage_dev *g, unsigned gpio)
-{
-    void *reg = GPIO_REG_SET(gpio) + g->gpio_reg;
-
-    writel(readl(reg) | GPIO_BIT(gpio), reg);
-}
-
-static void gpio_clear(struct garage_dev *g, unsigned gpio)
-{
-    void *reg = GPIO_REG_CLEAR(gpio) + g->gpio_reg;
-
-    writel(readl(reg) | GPIO_BIT(gpio), reg);
-}
 
 static int garage_allocate_resources(struct garage_dev *g)
 {
@@ -206,6 +164,7 @@ static int start_dummy_tx(struct garage_dev *g)
     struct dma_slave_config slave_config = {};
     dma_addr_t src_ad;
     int i, err;
+    struct scatterlist sg;
 
     if((err = dmaengine_terminate_all(g->dma_chan)) < 0) {
         dev_err(g->dev, "dmaengine_terminate_all failed\n");
@@ -226,14 +185,14 @@ static int start_dummy_tx(struct garage_dev *g)
         return -EINVAL;
     }
 
-    sg_init_table(&g->sg, 1); // dummy sg, will be ignored
-    sg_dma_address(&g->sg) = g->cb_handle;
-    sg_dma_len(&g->sg) = 4;
+    sg_init_table(&sg, 1); // dummy sg, will be ignored
+    sg_dma_address(&sg) = g->cb_handle;
+    sg_dma_len(&sg) = 4;
 
     // setup a dummy tx, we're only interested in setting up the completion callback
     desc = dmaengine_prep_slave_sg(
             g->dma_chan, 
-            &g->sg, 1, 
+            &sg, 1, 
             DMA_MEM_TO_DEV, 
             DMA_PREP_INTERRUPT);
 
@@ -388,7 +347,7 @@ static int garage_probe(struct platform_device *pdev)
         return err;
     }
 
-    // setup buffer
+    // setup the buffer
     buf[0] = GPIO_BIT(BUSY_LED_PIN);       // busy led pin
     buf[1] = 0;             // amplitude == 0
     buf[2] = 0xaaaaaaaa;    // amplitude == max (1010101010...1010b)

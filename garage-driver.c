@@ -133,7 +133,10 @@ static int send_sequence(struct garage_dev *g, const char *code)
 
     // set PWM clock to 2x carrier frequency 
     // (2x, because 101010...1010b serializer pattern divides clock frequency by two)
-    pwm_clock_init(g, g->freq*2);
+    if((err=pwm_clock_init(g, g->freq*2)) < 0) {
+        garage_stop(g);
+        return err;
+    }
 
     pwm_stop(g);
 
@@ -195,6 +198,11 @@ static ssize_t carrier_store(struct device *dev, struct device_attribute *attr, 
         return -EINVAL;
     }
 
+    if(new < 1000000L || new > 500000000L) {
+        dev_err(g->dev, "error: carrier frequency out of range\n");
+        return -EINVAL;
+    }
+
     if(g == NULL) {
         dev_err(g->dev, "error: garage driver not loaded\n");
         return -EINVAL;
@@ -231,6 +239,11 @@ static ssize_t srate_store(struct device *dev, struct device_attribute *attr, co
 
     if(g == NULL) {
         dev_err(g->dev, "error: garage driver not loaded\n");
+        return -EINVAL;
+    }
+
+    if(new <= 0 || new > g->freq/16) {
+        dev_err(g->dev, "error: sample rate frequency out of range\n");
         return -EINVAL;
     }
 

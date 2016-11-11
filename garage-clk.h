@@ -22,7 +22,7 @@
 
 struct garage_dev;
 
-void pwm_clock_init(struct garage_dev *g, int freq);
+int pwm_clock_init(struct garage_dev *g, int freq);
 void pwm_clock_stop(struct garage_dev *g);
 
 #endif

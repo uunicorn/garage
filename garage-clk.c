@@ -7,12 +7,25 @@
 #include "garage-driver.h"
 #include "garage-clk.h"
 
-void pwm_clock_init(struct garage_dev *g, int freq)
+int pwm_clock_init(struct garage_dev *g, int freq)
 {
     int divi, divf;
     long long tmp;
-    u32 ctl = CLK_PASSWD | CLKCNTL_MASH(3) | PLL_1GHZ;
+    int mash;
+    u32 ctl;
 
+    if(g->freq < 1000000L || g->freq > 500000000L) {
+        return -EINVAL;
+    }
+
+    if(g->freq < 100000000L)
+        mash = 3;
+    else if(g->freq <= 150000000L)
+        mash = 2;
+    else
+        mash = 1;
+
+    ctl = CLK_PASSWD | CLKCNTL_MASH(mash) | PLL_1GHZ;
     divi = GHZ/freq;
     tmp = 0x1000LL*(GHZ%freq);
     do_div(tmp, freq);
@@ -21,6 +34,8 @@ void pwm_clock_init(struct garage_dev *g, int freq)
     writel(ctl, g->clk_reg + PWMCLK_CNTL); // disable clock
     writel(CLK_PASSWD | CLKDIV_DIVI(divi) | CLKDIV_DIVF(divf), g->clk_reg + PWMCLK_DIV); // set div ratio
     writel(ctl | CLKCNTL_ENAB, g->clk_reg + PWMCLK_CNTL); // enable clock
+
+    return 0;
 }
 
 

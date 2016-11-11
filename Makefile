@@ -1,6 +1,6 @@
 MODULE_NAME=garage-door
 
-$(MODULE_NAME)-y += garage-driver.o garage-gpio.o garage-pwm.o
+$(MODULE_NAME)-y += garage-driver.o garage-gpio.o garage-pwm.o garage-dma.o
 
 obj-m := $(MODULE_NAME).o
 

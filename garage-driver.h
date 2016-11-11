@@ -16,4 +16,7 @@ struct garage_dev {
     ktime_t start_time;
 };
 
+
+void garage_dma_done(void *data);
+
 #endif

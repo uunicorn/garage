@@ -12,21 +12,17 @@
 #include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
-#include <linux/dmaengine.h>
-#include <linux/platform_data/dma-bcm2708.h>
-#include <linux/dma-mapping.h>
 #include <linux/delay.h>
 #include <linux/timekeeping.h>
 
 #include "garage-driver.h"
 #include "garage-gpio.h"
 #include "garage-pwm.h"
+#include "garage-dma.h"
 
 #define DRVNAME "garage-door"
 
 #define BUSY_LED_PIN 19
-
-#define PHYS_TO_DMA(x)  (0x7E000000 - BCM2708_PERI_BASE + x)
 
 #define CLK_BASE        (BCM2708_PERI_BASE + 0x101000)
 #define PWMCLK_CNTL     0xa0
@@ -46,8 +42,6 @@
 #define CLKDIV_DIVI(x)  (x << 12)
 #define CLKDIV_DIVF(x)  (x << 0)
 
-// reserve this number of DMA control blocks
-#define MAX_CBS 600
 
 // AM sequence
 const char * const code = "111110110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111111011001001001001001001011011001001001011011111110110010010010010010010110110010010010110111111101100100100100100100101101100100100101101111110";
@@ -56,50 +50,24 @@ static struct platform_device *pdev;
 
 static int garage_allocate_resources(struct garage_dev *g)
 {
-    dma_cap_mask_t mask;
-    dma_set_coherent_mask(g->dev, DMA_BIT_MASK(32)); //move to __init
+    int err;
 
     g->gpio_reg = ioremap(GPIO_BASE, SZ_16K);
     g->pwm_reg = ioremap(PWM_BASE, SZ_16K);
     g->clk_reg = ioremap(CLK_BASE, SZ_16K);
-    g->dma_reg = ioremap(DMA_BASE, SZ_16K);
 
-    dma_cap_zero(mask);
-    dma_cap_set(DMA_SLAVE, mask);
-    g->dma_chan = dma_request_channel(mask, NULL, NULL);
-    if(g->dma_chan == NULL) {
-        dev_err(g->dev, "error: DMA request channel failed\n");
-        return -EIO;
-    }
-
-    g->cb_base = dma_alloc_writecombine(g->dev, SZ_64K, &g->cb_handle, GFP_KERNEL);
-    if(g->cb_base == NULL) {
-        dev_err(g->dev, "error: dma_alloc_writecombine failed\n");
-        return -ENOMEM;
-    }
-
-    printk(KERN_INFO "Allocated DMA channel %d\n", g->dma_chan->chan_id);
+    if((err = dma_allocate(g)) < 0)
+        return err;
 
     return 0;
 }
 
-static int garage_release_resources(struct garage_dev *g)
+static void garage_release_resources(struct garage_dev *g)
 {
-    gpio_set_mode(g, 18, 1);
-
-    if(g->dma_chan_base) {
-        writel(BCM2708_DMA_RESET, g->dma_chan_base + BCM2708_DMA_CS);
-    }
-
-    if(g->dma_chan) {
-        dma_release_channel(g->dma_chan);
-    }
-
-    if(g->cb_base) {
-        dma_free_writecombine(g->dev, SZ_64K, g->cb_base, g->cb_handle);
-    }
-
-    return 0;
+    dma_release(g);
+    iounmap(g->gpio_reg);
+    iounmap(g->pwm_reg);
+    iounmap(g->clk_reg);
 }
 
 static void garage_stop(struct garage_dev *g)
@@ -118,12 +86,11 @@ static void garage_stop(struct garage_dev *g)
     }
 
     if(g->dma_chan_base) {
-        writel(BCM2708_DMA_RESET | BCM2708_DMA_ABORT, g->dma_chan_base + BCM2708_DMA_CS);
-        writel(BCM2708_DMA_INT | BIT(1), g->dma_chan_base + BCM2708_DMA_CS); // INT & END
+        dma_reset(g);
     }
 }
 
-static void garage_dma_done(void *data)
+void garage_dma_done(void *data)
 {
     struct garage_dev *g = data;
     ktime_t diff = ktime_sub(ktime_get(), g->start_time);
@@ -131,89 +98,6 @@ static void garage_dma_done(void *data)
     garage_stop(g);
 
     printk(KERN_INFO "all done: %ld ms\n", (long)ktime_to_ms(diff));
-}
-
-// bcm2835 dmaengine driver does not support interlived transactions.
-// Here we use a hack to get an exclusive access to the channel registers,
-// while letting dmaengine handle the IRQ for us.
-static int start_dummy_tx(struct garage_dev *g) 
-{
-    struct dma_async_tx_descriptor *desc;
-    dma_cookie_t cookie;
-    struct dma_slave_config slave_config = {};
-    dma_addr_t src_ad;
-    int i, err;
-    struct scatterlist sg;
-
-    if((err = dmaengine_terminate_all(g->dma_chan)) < 0) {
-        dev_err(g->dev, "dmaengine_terminate_all failed\n");
-        return err;
-    }
-
-    slave_config.dst_addr_width = DMA_SLAVE_BUSWIDTH_4_BYTES;
-    slave_config.dst_addr = 0x7e200028;
-    slave_config.src_maxburst = 1;
-    slave_config.dst_maxburst = 1;
-    slave_config.slave_id = 5;
-    slave_config.direction = DMA_MEM_TO_DEV;
-    slave_config.device_fc = false;
-
-    if (dmaengine_slave_config(g->dma_chan, &slave_config)) {
-        dev_err(g->dev, "failed to configure dma channel\n");
-        garage_release_resources(g);
-        return -EINVAL;
-    }
-
-    sg_init_table(&sg, 1); // dummy sg, will be ignored
-    sg_dma_address(&sg) = g->cb_handle;
-    sg_dma_len(&sg) = 4;
-
-    // setup a dummy tx, we're only interested in setting up the completion callback
-    desc = dmaengine_prep_slave_sg(
-            g->dma_chan, 
-            &sg, 1, 
-            DMA_MEM_TO_DEV, 
-            DMA_PREP_INTERRUPT);
-
-    if (!desc) {
-        dev_err(g->dev, "error: dmaengine_prep_slave_sg failed\n");
-        garage_release_resources(g);
-        return -EINVAL;
-    }
-
-    desc->callback = garage_dma_done;
-    desc->callback_param = g;
-
-    // submit tx, while DREQ is inactive, so we can identify 
-    // hardware channel number and hack our own CBs
-    cookie = dmaengine_submit(desc);
-
-    err = dma_submit_error(cookie);
-    if(err) {
-        dev_err(g->dev, "error: dmaengine_submit failed\n");
-        return err;
-    }
-
-    g->dma_chan->device->device_issue_pending(g->dma_chan);
-
-    // guess hw channel number by looking for transfer source addess in DMA registers
-    for(i=0;i<15;i++) {
-        g->dma_chan_base = g->dma_reg + i*0x100;
-        src_ad = readl(g->dma_chan_base + BCM2708_DMA_SOURCE_AD);
-        // DMA read is not controled by DREQ, so src address must be already incremeted
-        if(src_ad == g->cb_handle + 4) {
-            printk(KERN_INFO "Detected hw channel %d.\n", i);
-            break;
-        }
-    }
-
-    if(i == 15) {
-        g->dma_chan_base = NULL;
-        dev_err(g->dev, "error: failed to identify allocated channel\n");
-        return -EINVAL;
-    }
-
-    return 0;
 }
 
 static void init_pwm_clock(struct garage_dev *g, int freq)
@@ -230,38 +114,6 @@ static void init_pwm_clock(struct garage_dev *g, int freq)
     writel(ctl, g->clk_reg + PWMCLK_CNTL); // disable clock
     writel(CLK_PASSWD | CLKDIV_DIVI(divi) | CLKDIV_DIVF(divf), g->clk_reg + PWMCLK_DIV); // set div ratio
     writel(ctl | CLKCNTL_ENAB, g->clk_reg + PWMCLK_CNTL); // enable clock
-}
-
-
-static struct bcm2708_dma_cb *add_xfer(struct garage_dev *g, dma_addr_t from, dma_addr_t to, int len)
-{
-    struct bcm2708_dma_cb *cb = g->cb_base + g->sample;
-
-    if(g->sample > 0) {
-        g->cb_base[g->sample-1].next = g->cb_handle + sizeof(*cb)*g->sample;
-    }
-
-    cb->info = 
-        BCM2708_DMA_WAIT_RESP | 
-        BCM2708_DMA_S_INC | 
-        BCM2708_DMA_BURST(1) | 
-        BIT(26) | // no wide bursts
-        0; 
-    cb->src = from;
-    cb->dst = to;
-    cb->length = len;
-    cb->stride = 0;
-    cb->next = 0;
-    cb->pad[0] = 0;
-    cb->pad[1] = 0;
-
-    if(g->sample < MAX_CBS) {
-        g->sample++;
-    } else {
-        dev_err(g->dev, "error: out of CBs!\n");
-    }
-
-    return cb;
 }
 
 static void outbit(struct garage_dev *g, int bit)
@@ -330,8 +182,7 @@ static int garage_probe(struct platform_device *pdev)
     add_xfer(g, g->buf_handle, PHYS_TO_DMA(GPIO_BASE + GPIO_REG_CLEAR(BUSY_LED_PIN)), 4)
         ->info |= BCM2708_DMA_INT_EN;
 
-    writel(BCM2708_DMA_RESET | BCM2708_DMA_ABORT, g->dma_chan_base + BCM2708_DMA_CS);
-    writel(BCM2708_DMA_INT | BIT(1), g->dma_chan_base + BCM2708_DMA_CS); // clear INT & END
+    dma_reset(g);
 
     bcm_dma_start(g->dma_chan_base, g->cb_handle);
     g->start_time = ktime_get();
@@ -350,11 +201,6 @@ static int garage_remove(struct platform_device *pdev)
     garage_stop(g);
 
     garage_release_resources(g);
-
-    iounmap(g->gpio_reg);
-    iounmap(g->pwm_reg);
-    iounmap(g->clk_reg);
-    iounmap(g->dma_reg);
 
     printk(KERN_INFO "Goodbye world.\n");
 

@@ -20,6 +20,7 @@
 
 #include "garage-driver.h"
 #include "garage-gpio.h"
+#include "garage-pwm.h"
 
 #define DRVNAME "garage-door"
 
@@ -44,28 +45,6 @@
 
 #define CLKDIV_DIVI(x)  (x << 12)
 #define CLKDIV_DIVF(x)  (x << 0)
-
-#define PWM_BASE        (BCM2708_PERI_BASE + 0x20C000)
-
-#define PWM_CTRL 0x00
-#define PWM_STAT 0x04
-#define PWM_DMAC 0x08
-#define PWM_FIFO 0x18
-#define PWM_RNG1 0x10
-#define PWM_RNG2 0x20
-#define PWM_DAT1 0x14
-#define PWM_DAT2 0x24
-
-#define PWMCTRL_PWEN1   BIT(0)
-#define PWMCTRL_MODE1   BIT(1)
-#define PWMCTRL_RPTL1   BIT(2)
-#define PWMCTRL_CLRF    BIT(6)
-#define PWMCTRL_PWEN2   BIT(8)
-#define PWMCTRL_RPTL2   BIT(10)
-#define PWMCTRL_USEF2   BIT(13)
-#define PWMCTRL_MSEN2   BIT(15)
-
-#define PWMDMAC_ENAB    BIT(31)
 
 // reserve this number of DMA control blocks
 #define MAX_CBS 600
@@ -135,7 +114,7 @@ static void garage_stop(struct garage_dev *g)
     }
 
     if(g->pwm_reg) {
-        writel(PWMCTRL_CLRF, g->pwm_reg + PWM_CTRL);
+        pwm_stop(g);
     }
 
     if(g->dma_chan_base) {
@@ -327,20 +306,9 @@ static int garage_probe(struct platform_device *pdev)
     // (2x, because 101010...1010b serializer pattern divides clock frequency by two)
     init_pwm_clock(g, g->freq*2);
 
-    writel(PWMCTRL_CLRF, g->pwm_reg + PWM_CTRL); // stop both channels, clear fifo
-    writel(0, g->pwm_reg + PWM_DMAC); // disable DMA
+    pwm_stop(g);
 
-    writel(32, g->pwm_reg + PWM_RNG1); // set PWM1 pattern width to 32 bits
-    writel(0, g->pwm_reg + PWM_DAT1); // set initial amplitude to zero (seializing zero)
-
-    writel(width, g->pwm_reg + PWM_RNG2); // set period to 1/2 seconds
-    // enable channels:
-    // PWM1 - 32bit serializer mode, no FIFO, repeat
-    // PWM2 - M/S mode, FIFO, no repeat
-    writel(PWMCTRL_CLRF | 
-            PWMCTRL_MODE1 | PWMCTRL_PWEN1 | PWMCTRL_RPTL1 | 
-            PWMCTRL_MSEN2 | PWMCTRL_PWEN2 | PWMCTRL_USEF2, 
-            g->pwm_reg + PWM_CTRL);
+    pwm_init(g, 0); // start PWM, but keep DREQ low
 
     if((err = start_dummy_tx(g)) < 0) {
         garage_release_resources(g);
@@ -368,12 +336,7 @@ static int garage_probe(struct platform_device *pdev)
     bcm_dma_start(g->dma_chan_base, g->cb_handle);
     g->start_time = ktime_get();
 
-    // clear FIFO, restart PWM
-    writel(PWMCTRL_CLRF | 
-            PWMCTRL_MODE1 | PWMCTRL_PWEN1 | PWMCTRL_RPTL1 | 
-            PWMCTRL_MSEN2 | PWMCTRL_PWEN2 | PWMCTRL_USEF2, 
-            g->pwm_reg + PWM_CTRL);
-    writel(PWMDMAC_ENAB | 1, g->pwm_reg + PWM_DMAC); // enable DMA, 1 word threshold
+    pwm_init(g, 1); // restart PWM, enable DMA
 
     return 0;
 }

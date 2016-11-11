@@ -13,11 +13,12 @@ struct garage_dev {
     struct dma_chan *dma_chan;
     struct bcm2708_dma_cb *cb_base;		/* DMA control blocks */
     dma_addr_t cb_handle, buf_handle;
-    int magic;
     int sample;
     int freq;
     int srate;
     ktime_t start_time;
+    wait_queue_head_t wq;
+    int done;
 };
 
 

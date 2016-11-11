@@ -67,6 +67,9 @@ void garage_dma_done(void *data)
 
     garage_stop(g);
 
+    g->done = 1;
+    wake_up_interruptible(&g->wq);
+
     printk(KERN_INFO "all done: %ld ms\n", (long)ktime_to_ms(diff));
 }
 
@@ -87,11 +90,11 @@ static int garage_probe(struct platform_device *pdev)
     int err;
 
     platform_set_drvdata(pdev, g);
-    g->magic = 0x111118;
     g->dev = dev;
     g->dma_chan_base = NULL;
     g->freq = 0;
     g->srate = 0;
+    init_waitqueue_head(&g->wq);
 
     if((err = garage_allocate_resources(g)) < 0) {
         garage_release_resources(g);
@@ -123,6 +126,7 @@ static int send_sequence(struct garage_dev *g, const char *code)
     const char *p;
     int err;
 
+    g->done = 0;
     gpio_set_mode(g, 18, 2);                // pin18 -> PWM out
     gpio_set_mode(g, BUSY_LED_PIN, 1);      // GPIO out (busy led)
     gpio_set(g, BUSY_LED_PIN);              // busy led ON
@@ -246,7 +250,10 @@ static ssize_t sequence_store(struct device *dev, struct device_attribute *attr,
     }
 
     err = send_sequence(g, buf);
+    if(err < 0)
+        return err;
 
+    err = wait_event_interruptible(g->wq, g->done);
     if(err < 0)
         return err;
 

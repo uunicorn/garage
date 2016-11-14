@@ -7,6 +7,9 @@ I've got an Apache server running on my RPi with a single page and a cgi-bin scr
 to [this](test.sh). This server is only visible within my Wifi network, so Wifi password is 
 effectively used to restricts access to this resource.
 
+## Hardware
+Connect a piece of wire to GPIO18 pin. Ideally ~2m long, but ~20cm works as well. This is your antenna.
+
 ## Building
 Instructions may vary depending on your RPi version.
 
